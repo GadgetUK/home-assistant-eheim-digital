@@ -1,10 +1,17 @@
 """EHEIM WebSocket Client."""
 import json
-import websockets
 import asyncio
-from typing import Dict
-from .devices import EheimDevice
+from typing import Dict, Optional
 
+from websockets.asyncio.client import connect, ClientConnection
+from websockets.protocol import State
+from websockets.exceptions import (
+    ConnectionClosed,
+    ConnectionClosedOK,
+    ConnectionClosedError,
+)
+
+from .devices import EheimDevice
 from .const import LOGGER
 
 
@@ -23,7 +30,7 @@ class EheimDigitalWebSocketClient:
         """EHEIM WebSocket Client initialization."""
         self._host = host
         self._url = f"ws://{host}/ws"
-        self._websocket = None
+        self._websocket: Optional[ClientConnection] = None
         self._devices = None
         self._client_list = None
         self._lock = asyncio.Lock()
@@ -34,7 +41,7 @@ class EheimDigitalWebSocketClient:
 
     @property
     def is_connected(self):
-        return self._websocket is not None and not self._websocket.closed
+        return self._websocket is not None and self._websocket.state is State.OPEN
 
     async def reconnect(self):
         """Attempt to reconnect to the server."""
@@ -78,9 +85,8 @@ class EheimDigitalWebSocketClient:
         async with self._lock:  # Ensure only one connection attempt at a time
             LOGGER.debug("WEBSOCKET: Called function connect_websocket")
             try:
-                self._websocket = await websockets.connect(
-                    self._url, subprotocols=["arduino"]
-                )  # pylint: disable=all
+                # websockets v15 style connect()
+                self._websocket = await connect(self._url, subprotocols=["arduino"])
 
                 # Process the first two initial messages
                 for _ in range(2):
@@ -104,16 +110,23 @@ class EheimDigitalWebSocketClient:
         """Disconnect from the WebSocket server."""
         async with self._lock:  # Ensure only one disconnection attempt at a time
             LOGGER.debug("WEBSOCKET: Called function disconnect_websocket")
-            if self._websocket:
-                await self._websocket.close()
-                self._websocket = None
+            if self._websocket and self._websocket.state is not State.CLOSED:
+                try:
+                    await self._websocket.close()
+                    # Niet alle servers ondersteunen wait_closed; defensief afvangen
+                    try:
+                        await self._websocket.wait_closed()
+                    except Exception:
+                        pass
+                finally:
+                    self._websocket = None
 
     async def fetch_devices(self) -> list[EheimDevice]:
         """Fetch devices information and data from the WebSocket."""
         LOGGER.debug("WEBSOCKET: Called function fetch_devices")
 
         # Connect to the WebSocket if not connected
-        if self._websocket is None:
+        if self._websocket is None or self._websocket.state is not State.OPEN:
             await self.connect_websocket()
 
         # Initialize devices as an empty list
@@ -121,7 +134,7 @@ class EheimDigitalWebSocketClient:
 
         # Iterate through the unique clients, send requests for device information, and process the responses
         async with self._lock:
-            for client in self._client_list:
+            for client in self._client_list or []:
                 request_message = (
                     f'{{"title": "GET_USRDTA","to": "{client}","from": "USER"}}'
                 )
@@ -143,10 +156,10 @@ class EheimDigitalWebSocketClient:
                 # Process the response and extract the device information
                 if isinstance(messages, list):
                     for message in messages:
-                        if message["title"] == "USRDTA":
+                        if message.get("title") == "USRDTA":
                             device = EheimDevice(message)
                             devices.append(device)
-                elif isinstance(messages, dict) and messages["title"] == "USRDTA":
+                elif isinstance(messages, dict) and messages.get("title") == "USRDTA":
                     device = EheimDevice(messages)
                     devices.append(device)
 
@@ -172,15 +185,21 @@ class EheimDigitalWebSocketClient:
         """Send a specific message to the device and wait for its response."""
         await self.check_connection()
         async with self._lock:  # Ensure only one request is active at a time
-            if self._websocket is None:
+            if self._websocket is None or self._websocket.state is not State.OPEN:
                 await self.connect_websocket()
 
             message_str = json.dumps(message)
-            await self._websocket.send(message_str)
+            try:
+                await self._websocket.send(message_str)
+            except (ConnectionClosed, ConnectionClosedOK, ConnectionClosedError):
+                # Reconnect once en herstuur
+                await self.connect_websocket()
+                await self._websocket.send(message_str)
+
             LOGGER.debug("WEBSOCKET: Sent message: %s", message_str)
 
             while True:
-                response = await self._websocket.recv()
+                response = await self._websocket.recv()  # raises ConnectionClosed* bij verbreking
                 response_dict = json.loads(response)
 
                 if response_dict.get("title") in ["REQ_KEEP_ALIVE", "KEEP_ALIVE"]:
