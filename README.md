@@ -1,6 +1,17 @@
-# !!! WORK IN PROGRESS !!!
-!!! NOT YET FULLY FUNCTIONAL !!!
+> ⚠️ **Warning**
+>
+> This repository is no longer actively maintained.
+>  
+> No further development, improvements, or feature updates are planned.
+>
+> 
+> Please move to the [official integration](https://www.home-assistant.io/integrations/eheimdigital/) provided by [@autinerd](https://github.com/autinerd) 
 
+#
+#
+#
+#
+#
 
 # EHEIM Digital integration for Home Assistant (unofficial) 
 
